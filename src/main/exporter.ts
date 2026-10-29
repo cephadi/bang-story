@@ -178,13 +178,11 @@ function captionMetrics({ style, sizeScale }: CaptionTrack, h: number): { px: nu
 
 function captionStyleLines(track: CaptionTrack, w: number, h: number): string[] {
   const { style, pos } = track
-  // Poppins comes in several weight files; the other caption fonts have a single one.
   const font = style.fontInfo.id === 'poppins' ? (FONT_BY_WEIGHT[style.weight] ?? FONT_BY_WEIGHT[700]) : { name: style.fontInfo.family, bold: 0 }
   const { px, marginV } = captionMetrics(track, h)
   const size = Math.round(px * style.fontInfo.cell)
   const boxed = !!style.box
   const align = pos === 'atas' ? 8 : pos === 'tengah' ? 5 : 2
-  // A boxed caption is plain text over its own rounded box (CapBox); libass can only draw square boxes.
   const outline = boxed ? 0 : Math.max(1, Math.round(style.outline * h))
   const outlineColor = boxed ? '&HFF000000' : assColor(style.outlineColor)
   const side = Math.round((w * (1 - CAPTION_MAX_WIDTH)) / 2)
@@ -208,7 +206,6 @@ function captionEvents(track: CaptionTrack, w: number, h: number): string[] {
     const next = chunks[i + 1]
     const holdUntil = next ? Math.min(next.start, c.end + 0.6) : c.end + 0.6
     const shown = c.words.map((x) => displayWord(x.text, style))
-    // The same line breaks as the preview, written out so libass does not wrap on its own.
     const layout = layoutCaptionLines(shown, (t) => measure(t) * px, w * CAPTION_MAX_WIDTH)
     const breaks = new Set<number>()
     let count = 0
@@ -257,16 +254,10 @@ interface Segment {
   start: number
   own: number
   overlap: number
-  /** Extra frames rendered past the transition, so xfade never runs out of the first clip. */
   pad: number
   transition: string
 }
 
-/**
- * Places clips on whole frames. xfade stops the whole video when the first clip ends before the transition
- * offset, which happens with a one-frame cut whose offset falls between two frames. Frame-aligned starts
- * plus two spare frames per segment keep every transition inside the footage.
- */
 function planSegments(clips: Clip[], fps: number): Segment[] {
   let t = 0
   const frames = clips.map((clip) => {
@@ -280,7 +271,6 @@ function planSegments(clips: Clip[], fps: number): Segment[] {
     const tr = TRANSITIONS.find((x) => x.id === clip.transition)
     let overlapF = 0
     if (!last) {
-      // The clip's own transition length, never longer than either clip it joins.
       const room = Math.max(1, Math.min(endF - startF, frames[i + 1].endF - frames[i + 1].startF) - 1)
       overlapF = tr?.ffmpeg ? Math.min(room, Math.max(1, Math.round(transitionSecOf(clip) * fps))) : 1
     }
@@ -295,10 +285,6 @@ function planSegments(clips: Clip[], fps: number): Segment[] {
   })
 }
 
-/**
- * The size a camera move is rendered at before the final scale: the source's own detail, cropped to the frame,
- * so the move resamples real pixels once. Never below the output size, and at most twice it.
- */
 function workSize(srcW: number | null | undefined, srcH: number | null | undefined, size: { w: number; h: number }): { w: number; h: number } {
   if (!srcW || !srcH) return size
   const aspect = size.w / size.h
@@ -307,7 +293,6 @@ function workSize(srcW: number | null | undefined, srcH: number | null | undefin
   return { w: Math.round((size.w * f) / 2) * 2, h: Math.round((size.h * f) / 2) * 2 }
 }
 
-/** Scale and crop to the work size, the camera move, then down to the output size. */
 function cameraChain(cam: string | null, work: { w: number; h: number }, size: { w: number; h: number }, between: string[] = []): string {
   return [
     `scale=${work.w}:${work.h}:force_original_aspect_ratio=increase:flags=lanczos`,
@@ -320,7 +305,6 @@ function cameraChain(cam: string | null, work: { w: number; h: number }, size: {
   ].join(',')
 }
 
-/** An audio length to assume when an older asset never recorded its duration. */
 const UNKNOWN_AUDIO_MS = 10 * 60 * 1000
 
 function assetOf(bundle: ProjectBundle, id: string | null): Asset | undefined {
@@ -346,7 +330,6 @@ async function renderSegment(
     const cam = cameraPerspective(clip.videoCamera, clip.videoStrength, Math.max(2, Math.round(seg.own * opts.fps)), opts.fps)
     const work = cam ? workSize(video.width, video.height, size) : size
     const vf = cameraChain(cam, work, size, [`fps=${opts.fps}`, `tpad=stop_mode=clone:stop_duration=${len.toFixed(3)}`])
-    // A video trimmed on the timeline starts that far into its file.
     const from = clip.mediaInMs > 0 ? ['-ss', (clip.mediaInMs / 1000).toFixed(3)] : []
     await runFfmpeg([...from, '-i', assetAbsPath(bundle.project.id, video.localPath), '-vf', vf, '-t', len.toFixed(3), ...enc, out], tmp, signal)
     return out
@@ -389,7 +372,6 @@ async function renderProject(ctx: TaskCtx, projectId: string, opts: ExportOption
     const segs = planSegments(bundle.clips, opts.fps)
     const total = segs.reduce((n, s) => n + s.own, 0)
 
-    // 1. one silent video segment per clip, two at a time
     const files: string[] = new Array(segs.length)
     let done = 0
     let next = 0
@@ -403,9 +385,7 @@ async function renderProject(ctx: TaskCtx, projectId: string, opts: ExportOption
     }
     await Promise.all([worker(), worker()])
 
-    // 2. captions
     const style = resolveCaption(bundle.project.editor)
-    // Captions follow each clip's voice as trimmed and placed on the timeline.
     const chunks = timelineChunks(
       segs.map((s) => {
         const audio = assetOf(bundle, s.clip.audioAssetId)
@@ -415,7 +395,6 @@ async function renderProject(ctx: TaskCtx, projectId: string, opts: ExportOption
       })
     )
     const burn = opts.burnCaptions && !!style && chunks.length > 0
-    // Overlays are part of the picture, so they are drawn even when captions are left out.
     const overlays = bundle.project.editor.overlays ?? []
     const texts = overlays.filter((o): o is TextOverlay => o.kind === 'text' && !!o.text.trim() && o.start < total)
     const images = overlays
@@ -437,7 +416,6 @@ async function renderProject(ctx: TaskCtx, projectId: string, opts: ExportOption
       for (const f of readdirSync(fontsDir()).filter((x) => x.endsWith('.ttf'))) copyFileSync(join(fontsDir(), f), join(tmp, 'fonts', f))
     }
 
-    // 3. one ffmpeg pass: transitions + captions + audio mix
     const args: string[] = []
     files.forEach((f) => args.push('-i', f))
     const graph: string[] = []
@@ -447,7 +425,6 @@ async function renderProject(ctx: TaskCtx, projectId: string, opts: ExportOption
       graph.push(`${v}[${i + 1}:v]xfade=transition=${s.transition}:duration=${s.overlap.toFixed(6)}:offset=${segs[i + 1].start.toFixed(6)}${label}`)
       v = label
     })
-    // Logos and watermarks sit on the picture, under captions and overlay text.
     images.forEach(({ o, asset }, k) => {
       args.push('-i', assetAbsPath(projectId, asset.localPath))
       const iw = Math.max(2, Math.round((o.width * size.w) / 2) * 2)
@@ -467,13 +444,11 @@ async function renderProject(ctx: TaskCtx, projectId: string, opts: ExportOption
     segs.forEach((s, i) => {
       const audio = assetOf(bundle, s.clip.audioAssetId)
       if (!audio) return
-      // The voice as trimmed on the timeline, placed in its clip, and cut (with a short fade) at the clip's end.
       const span = voiceSpan(s.clip, audio.durationMs ?? UNKNOWN_AUDIO_MS)
       if (span.playMs <= 0) return
       args.push('-i', assetAbsPath(projectId, audio.localPath))
       const ms = Math.round(s.start * 1000 + span.startMs)
       const cut = span.playMs < span.lengthMs ? `,afade=t=out:st=${Math.max(0, span.playMs / 1000 - 0.06).toFixed(3)}:d=0.06` : ''
-      // Narration volume: for all clips plus this clip's own adjustment.
       const db = (bundle.project.editor.voiceVolumeDb ?? 0) + (s.clip.voiceGainDb ?? 0)
       const gain = Math.abs(db) > 0.01 ? `volume=${db.toFixed(2)}dB,` : ''
       graph.push(
@@ -489,7 +464,6 @@ async function renderProject(ctx: TaskCtx, projectId: string, opts: ExportOption
       aout = '[voice]'
     }
     if (music) {
-      // The music's stretch of the timeline: it starts `inSec` into the song, loops if needed and fades out.
       const span = musicSpan(bundle.project.editor, total)
       const len = span.endSec - span.startSec
       const delay = Math.round(span.startSec * 1000)
@@ -510,8 +484,7 @@ async function renderProject(ctx: TaskCtx, projectId: string, opts: ExportOption
       } else aout = '[mus]'
     }
     if (aout) {
-      // loudnorm works at 192 kHz internally, so resample back to 48 kHz afterwards.
-      graph.push(`${aout}${opts.normalizeAudio ? 'loudnorm=I=-14:LRA=11:TP=-1.5,' : ''}aresample=48000,apad,atrim=0:${total.toFixed(3)}[aout]`)
+      graph.push(`${aout}${opts.normalizeAudio ? 'loudnorm=I=-14:LRA=11:TP=-1.5,' : ''}aresample=48000,aformat=channel_layouts=stereo,apad,atrim=0:${total.toFixed(3)}[aout]`)
     } else {
       graph.push(`anullsrc=r=48000:cl=stereo,atrim=0:${total.toFixed(3)}[aout]`)
     }
